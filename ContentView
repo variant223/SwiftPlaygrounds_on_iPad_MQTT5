@@ -1,0 +1,236 @@
+import SwiftUI
+import Network
+
+class SimpleMQTTClient: ObservableObject {
+    private var connection: NWConnection?
+    private let host: String
+    private let port: UInt16
+    private let username: String
+    private let password: String
+    private let clientId: String
+    private var isConnected: Bool = false
+    
+    @Published var messages: [String] = []
+    
+    init(host: String, port: UInt16, username: String, password: String, clientId: String){
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.clientId = clientId
+    }
+    func connect(){
+        let endpoint = NWEndpoint.Host(host)
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        
+        connection = NWConnection(host: endpoint, port: nwPort, using: .tcp)
+        connection?.stateUpdateHandler = { [weak self] state in switch state {
+        case .ready:
+            print("Connected to \(self?.host ?? "") on port \(self?.port ?? 0)")
+            self?.isConnected = true
+            self?.sendConnectedPacket()
+            
+        case .failed(let error):
+            print("Failed to connect: \(error)")
+            self?.isConnected = false
+            
+        default:
+            break
+        }}
+        connection?.start(queue: .main)
+    }
+    
+    private func sendConnectedPacket(){
+        if isConnected {
+            let connectPacket = createConnectPacket()
+            print("Sending CONNECT packet: \(connectPacket)")
+            
+            connection?.send(content: connectPacket, completion: .contentProcessed { error in
+                if let error = error {
+                    print("Error send connect packet: \(error)")
+                } else {
+                    print("Connect packet send.")
+                    self.subscribe(to: "user_7face027/temp")
+                }
+            })
+        } else {
+            print("Socket is not connected, cannot send data.")
+        }
+    }
+    
+    
+    func receiveMessages() {
+        connection?.receive( minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] (data, context, isComplete, error) in
+            if let data = data, data.count > 0 {
+                let message = String(data: data, encoding: .utf8) ?? "Received data"
+                DispatchQueue.main.async {
+                    self?.messages.append(message)
+                }
+            }
+            self?.receiveMessages()
+        }
+    }
+    private func createConnectPacket() -> Data {
+        var packet = Data()
+        packet.append(0x10)
+        
+        let remainingLength = 4 + // Protocol Name
+        Int(clientId.count) +
+        Int(username.count) +
+        Int(password.count) +
+        18
+        
+        packet.append(UInt8(remainingLength))
+        
+        let protocolName = "MQTT"
+        let protocolLevel: UInt8 = 5 // MQTT 5
+        
+        let keepAlive: UInt16 = 60
+        
+        packet.append(UInt8(protocolName.count >> 8))
+        packet.append(UInt8(protocolName.count & 0xFF))
+        packet.append(contentsOf: protocolName.utf8)
+        
+        packet.append(protocolLevel)
+        
+        packet.append(0xc2) // flags
+        
+        packet.append(UInt8(keepAlive >> 8))
+        packet.append(UInt8(keepAlive & 0xFF))
+    
+        
+        // connect flags
+        packet.append(0x05)
+        packet.append(0x11)
+        packet.append(0x00)
+        packet.append(0x00)
+        packet.append(0x00)
+        packet.append(0x00)
+        
+        //Client ID
+        let clientIdData = "\(clientId)".data(using: .utf8)!
+        packet.append(UInt8(clientIdData.count >> 8))
+        packet.append(UInt8(clientIdData.count & 0xFF))
+        packet.append(clientIdData)
+        
+        //Username
+        let usernameData = "\(username)".data(using: .utf8)!
+        packet.append(UInt8(usernameData.count >> 8))
+        packet.append(UInt8(usernameData.count & 0xFF))
+        packet.append(usernameData)
+        
+        //Password
+        let passwordData = "\(password)".data(using: .utf8)!
+        packet.append(UInt8(passwordData.count >> 8))
+        packet.append(UInt8(passwordData.count & 0xFF ))
+        packet.append(passwordData)
+        
+        return packet
+    }
+    
+    func subscribe(to topic: String) {
+        if isConnected {
+            let subscribePacket = createSubscribePacket(for: topic)
+            connection?.send(content: subscribePacket, completion: .contentProcessed { error in
+                if let error = error {
+                    print("Error send subscribe packet: \(error)")
+                } else {
+                    print("Subscribe packet send.")
+                    self.receiveMessages()
+                    
+                }})
+        } else {
+            print("Soket is not connected, cannot send data.")
+        }
+    }
+    
+    private func createSubscribePacket(for topic: String) -> Data {
+        var packet = Data()
+        packet.append(0x82)
+        
+        //flags
+        packet.append(0x18)
+        packet.append(0x7e)
+        packet.append(0x7d)
+        packet.append(0x00)
+        
+        //Topic
+        let topicData = "\(topic)".data(using: .utf8)!
+        packet.append(UInt8(topicData.count >> 8))
+        packet.append(UInt8(topicData.count & 0xFF))
+        packet.append(topicData)
+        
+        packet.append(0x00)
+        return packet
+    }
+    
+    func publish(message: String, to topic: String) {
+        if isConnected {
+            let publishPacket = createPublishPacket(message: message, topic: topic)
+            connection?.send(content: publishPacket, completion: .contentProcessed { error in
+                if let error = error {
+                    print("Error sending publish packet: \(error)")
+                } else {
+                    print("Publish packet send.")
+                }})
+        } else {
+            print("Socket is not connected, cannot send data.")
+        }
+    }
+    private func createPublishPacket(message: String, topic: String) -> Data {
+        var packet = Data()
+        packet.append(0x30)
+        
+        
+        let remainingLength =
+        1 + //
+        Int(topic.count) +
+        2 + //
+        Int(message.count)
+        
+        packet.append(UInt8(remainingLength))
+        
+        let topicData = "\(topic)".data(using: .utf8)!
+        packet.append(UInt8(topicData.count >> 8))
+        packet.append(UInt8(topicData.count & 0xFF))
+        
+        packet.append(topicData)
+        packet.append(0x00)
+        
+        let messageData = "\(message)".data(using: .utf8)!
+        packet.append(contentsOf: messageData)
+        
+        return packet
+    }
+}
+    
+    struct ContentView: View {
+        @StateObject private var mqttClient = SimpleMQTTClient(
+            host: "srv2.clusterfly.ru",
+            port: 9991,
+            username: "user_7face027",
+            password: "uG***********", // Password
+            clientId: "mqttx_c9cc48es") 
+        
+        @State private var messageToSend: String = ""
+        
+        var body: some View {
+            VStack {
+                TextField("Message to send", text: $messageToSend)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding()
+                
+                Button("Connect"){
+                    mqttClient.connect()
+                }
+                
+                Button("Publish"){
+                    mqttClient.publish(message: messageToSend, to: "user_7face027/temp")
+                }
+                
+                List(mqttClient.messages, id: \.self) { message in
+                    Text(message)}
+            }
+        }//.padding()
+    }
+
